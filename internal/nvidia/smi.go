@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // SMIProvider collects GPU statistics using nvidia-smi.
@@ -49,12 +51,14 @@ func (p *SMIProvider) Gather(ctx context.Context) ([]GPUStats, error) {
 	}
 
 	cmd := exec.CommandContext(ctx, p.NvidiaSMIPath, args...)
+	// Bound output-pipe cleanup if a descendant inherits stdout or stderr.
+	cmd.WaitDelay = time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("nvidia-smi failed: %w: %s", err, stderr.String())
+		return nil, fmt.Errorf("nvidia-smi failed: %w: %s", errors.Join(err, ctx.Err()), stderr.String())
 	}
 
 	return ParseCSV(stdout.Bytes())
