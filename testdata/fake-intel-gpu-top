@@ -1,0 +1,19 @@
+#!/bin/bash
+# Test stand-in for intel_gpu_top -J: prints the fixture's JSON array one
+# sample at a time, then stays alive like the real tool does.
+#   FAKE_INTEL_FAIL=1         exit with an error before printing anything
+#   FAKE_INTEL_GARBAGE=1      print invalid JSON, then stay alive
+#   FAKE_INTEL_ARGS_FILE      write the arguments here
+#   FAKE_INTEL_STARTS_FILE    append one line here per start
+[ -n "$FAKE_INTEL_STARTS_FILE" ] && echo start >> "$FAKE_INTEL_STARTS_FILE"
+if [ "$FAKE_INTEL_FAIL" = "1" ]; then
+  echo "Failed to initialize PMU! (Permission denied)" >&2
+  exit 1
+fi
+echo "$@" > "${FAKE_INTEL_ARGS_FILE:-/dev/null}"
+if [ "$FAKE_INTEL_GARBAGE" = "1" ]; then
+  printf '[\n{"period": {"duration": not-json\n'
+  exec sleep 30
+fi
+cat "$(dirname "$0")/intel-gpu-top.json" | sed '$d'   # everything except the closing ]
+sleep 30
