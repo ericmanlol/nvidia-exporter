@@ -211,3 +211,44 @@ func TestProvider_ReportsProcessFailure(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// A parse error while intel_gpu_top keeps running must not block the restart
+// loop: runOnce kills and reaps the child, and Run starts a new one.
+func TestProvider_RestartsAfterParseError(t *testing.T) {
+	tool := fakeTool(t)
+	starts := filepath.Join(t.TempDir(), "starts")
+	t.Setenv("FAKE_INTEL_GARBAGE", "1")
+	t.Setenv("FAKE_INTEL_STARTS_FILE", starts)
+
+	p := NewGPUTopProvider(tool, "", time.Second, testLogger())
+	p.restartDelay = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- p.runOnce(ctx) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "reading intel_gpu_top output") {
+			t.Errorf("runOnce error = %v, want a read error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runOnce did not return after a parse error; the child was not killed")
+	}
+
+	go p.Run(ctx)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		b, _ := os.ReadFile(starts)
+		if n := strings.Count(string(b), "start"); n >= 3 { // runOnce above, then two from Run
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("intel_gpu_top was not restarted after a parse error (starts: %q)", b)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, _, err := p.Latest(); err == nil {
+		t.Error("Latest should report the parse error")
+	}
+}

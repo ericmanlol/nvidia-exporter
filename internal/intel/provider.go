@@ -21,6 +21,10 @@ var ErrNoSample = errors.New("no intel_gpu_top sample received yet")
 // restartDelay is how long Run waits before restarting a failed intel_gpu_top.
 const restartDelay = 5 * time.Second
 
+// waitDelay bounds how long runOnce waits for intel_gpu_top to exit, and for
+// its output pipes to close, after it has been killed or has exited.
+const waitDelay = 5 * time.Second
+
 // Provider returns the most recent intel_gpu_top sample.
 type Provider interface {
 	// Latest returns the newest sample and when it was received. The error is
@@ -37,6 +41,8 @@ type GPUTopProvider struct {
 	Interval time.Duration // sampling period (-s)
 	Logger   *slog.Logger
 
+	restartDelay time.Duration // tests shorten it
+
 	mu     sync.RWMutex
 	sample Sample
 	at     time.Time
@@ -51,6 +57,8 @@ func NewGPUTopProvider(path, device string, interval time.Duration, logger *slog
 		Interval: interval,
 		Logger:   logger,
 		err:      ErrNoSample,
+
+		restartDelay: restartDelay,
 	}
 }
 
@@ -83,12 +91,12 @@ func (p *GPUTopProvider) Run(ctx context.Context) {
 		p.mu.Lock()
 		p.err = err
 		p.mu.Unlock()
-		p.Logger.Error("intel_gpu_top stopped, restarting", "error", err, "delay", restartDelay)
+		p.Logger.Error("intel_gpu_top stopped, restarting", "error", err, "delay", p.restartDelay)
 
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(restartDelay):
+		case <-time.After(p.restartDelay):
 		}
 	}
 }
@@ -101,6 +109,7 @@ func (p *GPUTopProvider) runOnce(ctx context.Context) error {
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	cmd.WaitDelay = waitDelay
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting intel_gpu_top: %w", err)
@@ -108,6 +117,11 @@ func (p *GPUTopProvider) runOnce(ctx context.Context) error {
 	p.Logger.Info("started intel_gpu_top", "args", strings.Join(p.args(), " "))
 
 	readErr := p.readStream(stdout)
+	if readErr != nil {
+		// The output can no longer be decoded, but intel_gpu_top may still be
+		// running. Kill it so Wait returns and Run can start a fresh process.
+		_ = cmd.Process.Kill()
+	}
 	waitErr := cmd.Wait()
 	if ctx.Err() != nil {
 		return ctx.Err()
