@@ -41,11 +41,7 @@ func TestCollector_EmitsCorrectMetrics(t *testing.T) {
 
 	c := New(mock, time.Second, testLogger())
 
-	// Trigger initial collection
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	go c.Run(ctx)
-	time.Sleep(50 * time.Millisecond) // Allow collection to complete
+	c.collect(context.Background())
 
 	// Check a few key metrics
 	expected := `
@@ -82,11 +78,7 @@ func TestCollector_HandlesProviderError(t *testing.T) {
 
 	c := New(mock, time.Second, testLogger())
 
-	// Trigger initial collection (will fail)
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	go c.Run(ctx)
-	time.Sleep(50 * time.Millisecond)
+	c.collect(context.Background())
 
 	// Error metric should be 1
 	expected := `
@@ -122,13 +114,7 @@ func TestCollector_ServesStaleDataOnError(t *testing.T) {
 
 	c := New(mock, 50*time.Millisecond, testLogger())
 
-	// Start collection loop
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go c.Run(ctx)
-
-	// Wait for first successful collection
-	time.Sleep(30 * time.Millisecond)
+	c.collect(context.Background())
 
 	// Verify we have data
 	metrics := collectMetrics(t, c)
@@ -139,8 +125,8 @@ func TestCollector_ServesStaleDataOnError(t *testing.T) {
 	// Now make provider return error
 	mock.SetError(errors.New("gpu disconnected"))
 
-	// Wait for next collection (which will fail)
-	time.Sleep(70 * time.Millisecond)
+	// Complete the next collection (which will fail).
+	c.collect(context.Background())
 
 	// Error metric should be 1 but we should still have GPU metrics (stale data)
 	expected := `

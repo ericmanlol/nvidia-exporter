@@ -52,13 +52,37 @@ go build -o bin/nvidia-exporter ./cmd/nvidia-exporter
 | `--legacy-metrics` | `true` | Also export the `nvidia_*`/`intel_*` metrics that duplicate the common `gpu_*` metrics. Set `--legacy-metrics=false` once dashboards use `gpu_*` |
 | `--amd-sysfs-root` | `/sys` | sysfs mount point to find amdgpu devices under (`--backend=amd`), e.g. `/host/sys` in a container |
 | `--nvidia-smi-path` | `nvidia-smi` | Path to nvidia-smi binary |
+| `--nvidia-smi-timeout` | `5s` | Deadline for each NVIDIA collection; must be positive |
 | `--intel-gpu-top-path` | `intel_gpu_top` | Path to intel_gpu_top binary (`--backend=intel`) |
 | `--intel-device` | _(see [Choosing the GPU](#choosing-the-gpu))_ | intel_gpu_top `-d` device filter, e.g. `drm:/dev/dri/renderD128` or `pci:slot=0000:03:00.0` (`--backend=intel`) |
 | `--intel-hwmon` | `auto` | Intel GPU hwmon directory for power/energy/temperature/fan (`--backend=intel`): `auto` (the hwmon of the selected GPU), `off`, or a path such as `/sys/class/drm/card1/device/hwmon/hwmon5` |
 | `--intel-xpu-smi-path` | _(off)_ | Path to Intel `xpu-smi`; when set, GPU memory used/total is exported (`--backend=intel`; needs root and a working `xpu-smi`) |
 | `--intel-xpu-device` | _(matched by PCI address)_ | `xpu-smi` device id used with `--intel-xpu-smi-path` |
-| `--collect-interval` | `10s` | Interval between metric collections (sampling period for `--backend=intel`) |
+| `--collect-interval` | `10s` | Interval between metric collections (sampling period for `--backend=intel`); must be positive |
 | `--log-level` | `info` | Log level (debug, info, warn, error) |
+
+### Collection health and shutdown
+
+For NVIDIA, each collection has a `--nvidia-smi-timeout` deadline (default `5s`).
+Subprocess output cleanup may take up to one additional second after cancellation.
+Scrapes read the cache and remain responsive while collection is in progress.
+
+`gpu_exporter_collection_error{vendor="nvidia"}` and the legacy
+`nvidia_exporter_collection_error` are 1 before the first successful collection,
+after a failed or timed-out collection, or when the last success is older than
+three collection intervals plus the collection timeout (35s with the defaults).
+A successful collection clears the error and updates the last-success timestamp.
+For compatibility, cached GPU values remain available during failures; alerts and
+dashboards should check collection health and the last-success timestamp rather
+than treating every exposed reading as current. Before the first success, no GPU
+values or last-success timestamp are exported.
+
+Invalid collection intervals and timeouts are rejected before workers start.
+An HTTP listen failure exits nonzero so a service supervisor can restart the
+exporter. SIGINT/SIGTERM cancels collection and allows up to five seconds for
+HTTP shutdown and background workers to stop; exceeding that deadline is reported
+as an error.
+`/health` reports HTTP liveness; use the collection error metrics for GPU health.
 
 ### Endpoints
 

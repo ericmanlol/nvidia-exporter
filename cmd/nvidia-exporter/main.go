@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -20,33 +23,64 @@ import (
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx, os.Args[1:]); err != nil && !errors.Is(err, flag.ErrHelp) {
+		slog.Error("exporter stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run(parent context.Context, args []string) error {
+	flags := flag.NewFlagSet("nvidia-exporter", flag.ContinueOnError)
 	var (
-		listenAddress   = flag.String("listen-address", ":9835", "Address to listen on for HTTP requests")
-		metricsPath     = flag.String("metrics-path", "/metrics", "Path under which to expose metrics")
-		backend         = flag.String("backend", "nvidia", "GPU backend to collect from: nvidia (nvidia-smi), amd (amdgpu sysfs) or intel (intel_gpu_top)")
-		nvidiaSMIPath   = flag.String("nvidia-smi-path", "nvidia-smi", "Path to nvidia-smi binary")
-		intelGPUTopPath = flag.String("intel-gpu-top-path", "intel_gpu_top", "Path to intel_gpu_top binary (backend=intel)")
-		intelDevice     = flag.String("intel-device", "", "intel_gpu_top device filter, e.g. drm:/dev/dri/renderD128 (backend=intel; default: first GPU)")
-		intelHwmon      = flag.String("intel-hwmon", "auto", "Intel GPU hwmon directory for power/energy/temperature/fan (backend=intel): auto, off, or a path like /sys/class/drm/card1/device/hwmon/hwmon5")
-		intelXPUSMI     = flag.String("intel-xpu-smi-path", "", "Path to xpu-smi; when set, GPU memory used/total is exported (backend=intel; needs root)")
-		intelXPUDevice  = flag.String("intel-xpu-device", "", "xpu-smi device id for --intel-xpu-smi-path (backend=intel; default: the device at the selected GPU's PCI address)")
-		amdSysfsRoot    = flag.String("amd-sysfs-root", "/sys", "sysfs mount point to read amdgpu devices from (backend=amd)")
-		legacyMetrics   = flag.Bool("legacy-metrics", true, "Also export the vendor-prefixed nvidia_*/intel_* metrics that duplicate the common gpu_* metrics")
-		collectInterval = flag.Duration("collect-interval", 10*time.Second, "Interval between metric collections (sampling period for backend=intel)")
-		logLevel        = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
+		listenAddress   = flags.String("listen-address", ":9835", "Address to listen on for HTTP requests")
+		metricsPath     = flags.String("metrics-path", "/metrics", "Path under which to expose metrics")
+		backend         = flags.String("backend", "nvidia", "GPU backend to collect from: nvidia (nvidia-smi), amd (amdgpu sysfs) or intel (intel_gpu_top)")
+		nvidiaTimeout   = flags.Duration("nvidia-smi-timeout", collector.DefaultCollectionTimeout, "Timeout for each NVIDIA collection")
+		nvidiaSMIPath   = flags.String("nvidia-smi-path", "nvidia-smi", "Path to nvidia-smi binary")
+		intelGPUTopPath = flags.String("intel-gpu-top-path", "intel_gpu_top", "Path to intel_gpu_top binary (backend=intel)")
+		intelDevice     = flags.String("intel-device", "", "intel_gpu_top device filter, e.g. drm:/dev/dri/renderD128 (backend=intel; default: first GPU)")
+		intelHwmon      = flags.String("intel-hwmon", "auto", "Intel GPU hwmon directory for power/energy/temperature/fan (backend=intel): auto, off, or a path like /sys/class/drm/card1/device/hwmon/hwmon5")
+		intelXPUSMI     = flags.String("intel-xpu-smi-path", "", "Path to xpu-smi; when set, GPU memory used/total is exported (backend=intel; needs root)")
+		intelXPUDevice  = flags.String("intel-xpu-device", "", "xpu-smi device id for --intel-xpu-smi-path (backend=intel; default: the device at the selected GPU's PCI address)")
+		amdSysfsRoot    = flags.String("amd-sysfs-root", "/sys", "sysfs mount point to read amdgpu devices from (backend=amd)")
+		legacyMetrics   = flags.Bool("legacy-metrics", true, "Also export the vendor-prefixed nvidia_*/intel_* metrics that duplicate the common gpu_* metrics")
+		collectInterval = flags.Duration("collect-interval", 10*time.Second, "Interval between metric collections (sampling period for backend=intel)")
+		logLevel        = flags.String("log-level", "info", "Log level (debug, info, warn, error)")
 	)
-	flag.Parse()
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *collectInterval <= 0 {
+		return fmt.Errorf("--collect-interval must be greater than zero")
+	}
+	if *nvidiaTimeout <= 0 {
+		return fmt.Errorf("--nvidia-smi-timeout must be greater than zero")
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %v", flags.Args())
+	}
+	if *backend != "nvidia" && *backend != "intel" && *backend != "amd" {
+		return fmt.Errorf("unknown backend %q, want nvidia, amd or intel", *backend)
+	}
+	// Bind before starting workers: a startup failure must leave no collectors running.
+	listener, err := net.Listen("tcp", *listenAddress)
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+	defer listener.Close()
 
 	// Setup logger
 	level := parseLogLevel(*logLevel)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
-	slog.SetDefault(logger)
 
 	logger.Info("starting nvidia-exporter",
 		"backend", *backend,
 		"listen_address", *listenAddress,
 		"metrics_path", *metricsPath,
 		"nvidia_smi_path", *nvidiaSMIPath,
+		"nvidia_smi_timeout", *nvidiaTimeout,
 		"intel_gpu_top_path", *intelGPUTopPath,
 		"amd_sysfs_root", *amdSysfsRoot,
 		"legacy_metrics", *legacyMetrics,
@@ -55,7 +89,15 @@ func main() {
 	)
 
 	// Create context that cancels on SIGINT/SIGTERM
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
+	var workers sync.WaitGroup
+	start := func(fn func(context.Context)) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			fn(ctx)
+		}()
+	}
 	defer cancel()
 
 	// Create the collector for the selected backend and start it
@@ -64,9 +106,9 @@ func main() {
 	switch *backend {
 	case "nvidia":
 		provider := nvidia.NewSMIProvider(*nvidiaSMIPath)
-		coll := collector.New(provider, *collectInterval, logger).SetLegacy(*legacyMetrics)
+		coll := collector.New(provider, *collectInterval, logger).WithTimeout(*nvidiaTimeout).SetLegacy(*legacyMetrics)
 		reg.MustRegister(coll)
-		go coll.Run(ctx)
+		start(coll.Run)
 	case "intel":
 		title = "Intel GPU Exporter"
 		device := *intelDevice
@@ -84,11 +126,11 @@ func main() {
 		if *intelXPUSMI != "" {
 			xpu := intel.NewXPU(*intelXPUSMI, *intelXPUDevice, sel.PCISlot, *collectInterval, logger)
 			coll.WithXPU(xpu)
-			go xpu.Run(ctx)
+			start(xpu.Run)
 			logger.Info("xpu-smi memory metrics enabled", "path", *intelXPUSMI, "device", *intelXPUDevice, "pci_slot", sel.PCISlot)
 		}
 		reg.MustRegister(coll)
-		go provider.Run(ctx)
+		start(provider.Run)
 	case "amd":
 		title = "AMD GPU Exporter"
 		cards := amd.Discover(*amdSysfsRoot)
@@ -100,9 +142,11 @@ func main() {
 		}
 		reg.MustRegister(collector.NewAMD(*amdSysfsRoot))
 	default:
-		logger.Error("unknown backend, want nvidia, amd or intel", "backend", *backend)
-		os.Exit(2)
+		return fmt.Errorf("unknown backend %q", *backend)
 	}
+
+	workersDone := make(chan struct{})
+	go func() { workers.Wait(); close(workersDone) }()
 
 	// Create HTTP server
 	mux := http.NewServeMux()
@@ -141,35 +185,38 @@ func main() {
 		Handler: mux,
 	}
 
-	// Handle signals
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	// Start HTTP server goroutine
-	go func() {
-		logger.Info("starting HTTP server", "address", *listenAddress)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("HTTP server error", "error", err)
-			cancel()
-		}
-	}()
-
-	// Wait for signal
-	sig := <-sigCh
-	logger.Info("received signal, shutting down", "signal", sig)
-
-	// Cancel collector context
+	// Serve errors and shutdown signals both terminate the application.
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- server.Serve(listener) }()
+	logger.Info("starting HTTP server", "address", listener.Addr())
+	var serveErr error
+	select {
+	case serveErr = <-serverErr:
+	case <-ctx.Done():
+	}
 	cancel()
-
-	// Graceful shutdown of HTTP server
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
-
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Error("HTTP server shutdown error", "error", err)
+	shutdownErr := server.Shutdown(shutdownCtx)
+	if shutdownErr != nil {
+		// Shutdown does not close active connections after its deadline.
+		shutdownErr = errors.Join(shutdownErr, server.Close())
 	}
-
-	logger.Info("shutdown complete")
+	if serveErr == nil {
+		serveErr = <-serverErr
+	}
+	if errors.Is(serveErr, http.ErrServerClosed) {
+		serveErr = nil
+	}
+	select {
+	case <-workersDone:
+	case <-shutdownCtx.Done():
+		shutdownErr = errors.Join(shutdownErr, fmt.Errorf("wait for collectors: %w", shutdownCtx.Err()))
+	}
+	if shutdownErr == nil {
+		logger.Info("shutdown complete")
+	}
+	return errors.Join(serveErr, shutdownErr)
 }
 
 // openHwmon opens the hwmon directory chosen by intel.Select. It returns nil

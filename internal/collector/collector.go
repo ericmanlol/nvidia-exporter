@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strconv"
 	"sync"
@@ -13,9 +14,14 @@ import (
 
 const namespace = "nvidia"
 
+// DefaultCollectionTimeout bounds an NVIDIA collection unless overridden.
+const DefaultCollectionTimeout = 5 * time.Second
+
 // Collector implements prometheus.Collector for NVIDIA GPU metrics.
 type Collector struct {
 	provider nvidia.Provider
+	timeout  time.Duration
+	now      func() time.Time
 	interval time.Duration
 	logger   *slog.Logger
 	legacy   bool
@@ -51,6 +57,8 @@ func New(provider nvidia.Provider, interval time.Duration, logger *slog.Logger) 
 
 	return &Collector{
 		provider: provider,
+		timeout:  DefaultCollectionTimeout,
+		now:      time.Now,
 		interval: interval,
 		logger:   logger,
 		legacy:   true,
@@ -130,6 +138,13 @@ func New(provider nvidia.Provider, interval time.Duration, logger *slog.Logger) 
 	}
 }
 
+// WithTimeout sets the deadline for each collection. Call it before Run or
+// registration. timeout must be positive.
+func (c *Collector) WithTimeout(timeout time.Duration) *Collector {
+	c.timeout = timeout
+	return c
+}
+
 // SetLegacy turns the nvidia_* metrics that duplicate the common gpu_* metrics
 // on or off (default on). nvidia_gpu_performance_state has no common
 // equivalent and is always exported.
@@ -167,6 +182,10 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	lastUpdate := c.lastUpdate
 	lastError := c.lastError
 	c.mu.RUnlock()
+	// Retain cached values for compatibility, but never advertise missing or
+	// stale data as healthy. Repeated Add calls avoid duration multiplication overflow.
+	expires := lastUpdate.Add(c.timeout).Add(c.interval).Add(c.interval).Add(c.interval)
+	failed := lastError != nil || lastUpdate.IsZero() || c.now().After(expires)
 
 	// Emit GPU metrics
 	for _, gpu := range stats {
@@ -193,7 +212,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.clockMemory, prometheus.GaugeValue, gpu.ClockMemory*1e6, labels...)
 	}
 
-	c.common.emitExporter(ch, "nvidia", lastUpdate, lastError != nil)
+	c.common.emitExporter(ch, "nvidia", lastUpdate, failed)
 	if !c.legacy {
 		return
 	}
@@ -204,7 +223,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	errorVal := 0.0
-	if lastError != nil {
+	if failed {
 		errorVal = 1.0
 	}
 	ch <- prometheus.MustNewConstMetric(c.collectError, prometheus.GaugeValue, errorVal)
@@ -235,7 +254,12 @@ func (c *Collector) Run(ctx context.Context) {
 func (c *Collector) collect(ctx context.Context) {
 	start := time.Now()
 
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
 	stats, err := c.provider.Gather(ctx)
+	if ctx.Err() != nil && !errors.Is(err, ctx.Err()) {
+		err = errors.Join(err, ctx.Err())
+	}
 
 	duration := time.Since(start)
 
@@ -247,7 +271,7 @@ func (c *Collector) collect(ctx context.Context) {
 	} else {
 		c.logger.Debug("collection succeeded", "gpus", len(stats), "duration", duration)
 		c.stats = stats
-		c.lastUpdate = time.Now()
+		c.lastUpdate = c.now()
 		c.lastError = nil
 	}
 	c.mu.Unlock()
