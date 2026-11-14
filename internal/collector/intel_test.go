@@ -276,3 +276,56 @@ intel_exporter_xpu_error{device="default"} 1
 		t.Errorf("memory_total emitted without a total")
 	}
 }
+
+// A stale sample, or intel_gpu_top failing after it has produced samples, is
+// reported as an error, but the time of the last sample is kept so the
+// dashboard's collection age keeps growing instead of disappearing.
+func TestIntelCollector_KeepsLastTimestampOnError(t *testing.T) {
+	at := time.Unix(1700000000, 0)
+	expected := `
+# HELP gpu_exporter_collection_error 1 if the last collection from the GPU backend failed, 0 otherwise
+# TYPE gpu_exporter_collection_error gauge
+gpu_exporter_collection_error{vendor="intel"} 1
+# HELP gpu_exporter_last_collection_timestamp_seconds Unix timestamp of the last successful collection
+# TYPE gpu_exporter_last_collection_timestamp_seconds gauge
+gpu_exporter_last_collection_timestamp_seconds{vendor="intel"} 1.7e+09
+# HELP intel_exporter_collection_error 1 if there is no fresh intel_gpu_top sample, 0 otherwise
+# TYPE intel_exporter_collection_error gauge
+intel_exporter_collection_error{device="default"} 1
+# HELP intel_exporter_last_collection_timestamp_seconds Unix timestamp of the last intel_gpu_top sample
+# TYPE intel_exporter_last_collection_timestamp_seconds gauge
+intel_exporter_last_collection_timestamp_seconds{device="default"} 1.7e+09
+`
+	names := []string{
+		"gpu_exporter_collection_error", "gpu_exporter_last_collection_timestamp_seconds",
+		"intel_exporter_collection_error", "intel_exporter_last_collection_timestamp_seconds",
+	}
+
+	t.Run("stale", func(t *testing.T) {
+		mock := intel.NewMockProvider()
+		mock.SetSample(testSample(), at)
+		c := NewIntel(mock, "default", 30*time.Second)
+		c.now = func() time.Time { return at.Add(time.Minute) }
+		if err := testutil.CollectAndCompare(c, strings.NewReader(expected), names...); err != nil {
+			t.Error(err)
+		}
+	})
+	t.Run("failing", func(t *testing.T) {
+		mock := intel.NewMockProvider()
+		mock.SetSample(testSample(), at)
+		mock.SetError(errors.New("intel_gpu_top exited"))
+		c := NewIntel(mock, "default", 30*time.Second)
+		c.now = func() time.Time { return at.Add(time.Second) }
+		if err := testutil.CollectAndCompare(c, strings.NewReader(expected), names...); err != nil {
+			t.Error(err)
+		}
+	})
+	t.Run("no sample yet", func(t *testing.T) {
+		c := NewIntel(intel.NewMockProvider(), "default", 30*time.Second)
+		for _, n := range []string{"gpu_exporter_last_collection_timestamp_seconds", "intel_exporter_last_collection_timestamp_seconds"} {
+			if got := testutil.CollectAndCount(c, n); got != 0 {
+				t.Errorf("%s: got %d series before the first sample, want 0", n, got)
+			}
+		}
+	})
+}

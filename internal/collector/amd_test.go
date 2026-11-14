@@ -68,3 +68,31 @@ gpu_exporter_collection_error{vendor="amd"} 1
 		t.Errorf("got %d utilization series with no cards", n)
 	}
 }
+
+// When the card disappears, the error is reported but the last successful
+// collection time is kept, so the dashboard's collection age keeps growing.
+func TestAMDCollector_KeepsLastTimestampOnError(t *testing.T) {
+	sys := t.TempDir()
+	dev, hw := amd.FakeRDNA3()
+	if err := amd.FakeCard(sys, 1, "0000:03:00.0", dev, hw); err != nil {
+		t.Fatal(err)
+	}
+	c := NewAMD(sys)
+	c.now = func() time.Time { return time.Unix(1700000000, 0) }
+	testutil.CollectAndCount(c) // a successful scrape
+
+	c.sysRoot = t.TempDir() // the card is gone
+	c.now = func() time.Time { return time.Unix(1700000100, 0) }
+	expected := `
+# HELP gpu_exporter_collection_error 1 if the last collection from the GPU backend failed, 0 otherwise
+# TYPE gpu_exporter_collection_error gauge
+gpu_exporter_collection_error{vendor="amd"} 1
+# HELP gpu_exporter_last_collection_timestamp_seconds Unix timestamp of the last successful collection
+# TYPE gpu_exporter_last_collection_timestamp_seconds gauge
+gpu_exporter_last_collection_timestamp_seconds{vendor="amd"} 1.7e+09
+`
+	if err := testutil.CollectAndCompare(c, strings.NewReader(expected),
+		"gpu_exporter_collection_error", "gpu_exporter_last_collection_timestamp_seconds"); err != nil {
+		t.Error(err)
+	}
+}

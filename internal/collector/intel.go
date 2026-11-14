@@ -252,15 +252,17 @@ func (c *IntelCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 	}
 	c.common.emit(ch, cs)
-	if fresh {
-		c.common.emitExporter(ch, "intel", at, false)
-	} else {
-		c.common.emitExporter(ch, "intel", time.Time{}, true)
-	}
+	// at is the time of the last sample received (zero before the first). It is
+	// kept while intel_gpu_top is failing or its sample is stale, so the
+	// collection age keeps growing instead of disappearing.
+	c.common.emitExporter(ch, "intel", at, !fresh)
 
 	if !fresh {
 		if c.legacy {
 			ch <- prometheus.MustNewConstMetric(c.collectError, prometheus.GaugeValue, 1)
+			if !at.IsZero() {
+				ch <- prometheus.MustNewConstMetric(c.collectTime, prometheus.GaugeValue, float64(at.Unix()))
+			}
 		}
 		return
 	}

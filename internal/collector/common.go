@@ -113,7 +113,8 @@ func (d *commonDescs) emit(ch chan<- prometheus.Metric, s gpuStats) {
 }
 
 // emitExporter sends gpu_exporter_collection_error and, when last is set,
-// gpu_exporter_last_collection_timestamp_seconds.
+// gpu_exporter_last_collection_timestamp_seconds. last is the time of the last
+// successful collection and should be passed even when this one failed.
 func (d *commonDescs) emitExporter(ch chan<- prometheus.Metric, vendor string, last time.Time, failed bool) {
 	v := 0.0
 	if failed {

@@ -2,6 +2,7 @@ package collector
 
 import (
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -17,6 +18,9 @@ type AMDCollector struct {
 	sysRoot string
 	now     func() time.Time
 	common  *commonDescs
+
+	mu     sync.Mutex
+	lastOK time.Time // last scrape that found a card
 
 	gttUsed   *prometheus.Desc
 	gttTotal  *prometheus.Desc
@@ -70,11 +74,15 @@ func (c *AMDCollector) Collect(ch chan<- prometheus.Metric) {
 			ch <- prometheus.MustNewConstMetric(c.gttTotal, prometheus.GaugeValue, *st.GTTTotal, l...)
 		}
 	}
-	if len(cards) == 0 {
-		c.common.emitExporter(ch, "amd", time.Time{}, true)
-		return
+	c.mu.Lock()
+	if len(cards) > 0 {
+		c.lastOK = c.now()
 	}
-	c.common.emitExporter(ch, "amd", c.now(), false)
+	last := c.lastOK
+	c.mu.Unlock()
+	// The timestamp of the last successful scrape is kept while no card is
+	// found, so the collection age keeps growing instead of disappearing.
+	c.common.emitExporter(ch, "amd", last, len(cards) == 0)
 }
 
 func amdCommon(card amd.Card, st amd.Stats) gpuStats {
