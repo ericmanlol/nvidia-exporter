@@ -29,7 +29,7 @@ func main() {
 		intelDevice     = flag.String("intel-device", "", "intel_gpu_top device filter, e.g. drm:/dev/dri/renderD128 (backend=intel; default: first GPU)")
 		intelHwmon      = flag.String("intel-hwmon", "auto", "Intel GPU hwmon directory for power/energy/temperature/fan (backend=intel): auto, off, or a path like /sys/class/drm/card1/device/hwmon/hwmon5")
 		intelXPUSMI     = flag.String("intel-xpu-smi-path", "", "Path to xpu-smi; when set, GPU memory used/total is exported (backend=intel; needs root)")
-		intelXPUDevice  = flag.String("intel-xpu-device", "0", "xpu-smi device id for --intel-xpu-smi-path (backend=intel)")
+		intelXPUDevice  = flag.String("intel-xpu-device", "", "xpu-smi device id for --intel-xpu-smi-path (backend=intel; default: the device at the selected GPU's PCI address)")
 		amdSysfsRoot    = flag.String("amd-sysfs-root", "/sys", "sysfs mount point to read amdgpu devices from (backend=amd)")
 		legacyMetrics   = flag.Bool("legacy-metrics", true, "Also export the vendor-prefixed nvidia_*/intel_* metrics that duplicate the common gpu_* metrics")
 		collectInterval = flag.Duration("collect-interval", 10*time.Second, "Interval between metric collections (sampling period for backend=intel)")
@@ -73,17 +73,19 @@ func main() {
 		if device == "" {
 			device = "default"
 		}
-		provider := intel.NewGPUTopProvider(*intelGPUTopPath, *intelDevice, *collectInterval, logger)
+		// Resolve every source to the same GPU so readings are never mixed.
+		sel := intel.Select("/sys", *intelDevice, *intelHwmon, logger)
+		provider := intel.NewGPUTopProvider(*intelGPUTopPath, sel.GPUTopDevice, *collectInterval, logger)
 		// A sample is stale after three sampling periods plus a startup margin.
 		coll := collector.NewIntel(provider, device, 3**collectInterval+5*time.Second).SetLegacy(*legacyMetrics)
-		if hw := openHwmon(*intelHwmon, *intelDevice, logger); hw != nil {
+		if hw := openHwmon(sel.HwmonDir, logger); hw != nil {
 			coll.WithHwmon(hw)
 		}
 		if *intelXPUSMI != "" {
-			xpu := intel.NewXPU(*intelXPUSMI, *intelXPUDevice, *collectInterval, logger)
+			xpu := intel.NewXPU(*intelXPUSMI, *intelXPUDevice, sel.PCISlot, *collectInterval, logger)
 			coll.WithXPU(xpu)
 			go xpu.Run(ctx)
-			logger.Info("xpu-smi memory metrics enabled", "path", *intelXPUSMI, "device", *intelXPUDevice)
+			logger.Info("xpu-smi memory metrics enabled", "path", *intelXPUSMI, "device", *intelXPUDevice, "pci_slot", sel.PCISlot)
 		}
 		reg.MustRegister(coll)
 		go provider.Run(ctx)
@@ -170,20 +172,11 @@ func main() {
 	logger.Info("shutdown complete")
 }
 
-// openHwmon resolves the --intel-hwmon flag. It returns nil (hwmon metrics
-// disabled) for "off", or for "auto" when no Intel GPU hwmon device is found.
-func openHwmon(setting, device string, logger *slog.Logger) *intel.Hwmon {
-	dir := setting
-	switch setting {
-	case "off":
+// openHwmon opens the hwmon directory chosen by intel.Select. It returns nil
+// (hwmon metrics disabled) if dir is empty or cannot be read.
+func openHwmon(dir string, logger *slog.Logger) *intel.Hwmon {
+	if dir == "" {
 		return nil
-	case "auto":
-		var err error
-		dir, err = intel.FindHwmon("/sys", intel.PCISlotFromDevice(device))
-		if err != nil {
-			logger.Info("no Intel GPU hwmon found, hwmon metrics disabled", "error", err)
-			return nil
-		}
 	}
 	hw := intel.NewHwmon(dir)
 	if _, err := hw.Read(); err != nil {

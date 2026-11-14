@@ -61,22 +61,6 @@ func TestFindHwmon_IgnoresNonIntel(t *testing.T) {
 	}
 }
 
-func TestPCISlotFromDevice(t *testing.T) {
-	cases := map[string]string{
-		"":                             "",
-		"drm:/dev/dri/renderD128":      "",
-		"pci:slot=0000:00:10.0":        "0000:00:10.0",
-		"pci:vendor=8086,device=56a6":  "",
-		"pci:slot=0000:03:00.0,card=0": "0000:03:00.0",
-		"sys:/sys/devices/pci0000:00/0000:00:10.0/drm/card1": "0000:00:10.0",
-	}
-	for in, want := range cases {
-		if got := PCISlotFromDevice(in); got != want {
-			t.Errorf("PCISlotFromDevice(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 func TestHwmonRead(t *testing.T) {
 	_, mon := fakeSys(t)
 	write(t, filepath.Join(mon, "energy1_input"), "10000000") // 10 J

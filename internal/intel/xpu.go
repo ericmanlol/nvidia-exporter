@@ -35,11 +35,20 @@ type XPUProvider interface {
 // XPU polls `xpu-smi stats -d <device> -j` on an interval and keeps the newest
 // reading. The physical memory size comes from `xpu-smi discovery` and is read
 // once, retrying until it succeeds.
+//
+// xpu-smi numbers devices its own way, so the device is matched to the GPU the
+// other sources read by its PCI address (see pickXPUDevice). Until a device is
+// matched, or if the configured device is a different GPU, Latest returns an
+// error and no memory metrics are exported.
 type XPU struct {
 	Path     string        // xpu-smi binary
-	Device   string        // xpu-smi device id, e.g. "0"
+	Device   string        // xpu-smi device id, e.g. "0"; "" to match PCISlot
+	PCISlot  string        // PCI address of the selected GPU; "" if unknown
 	Interval time.Duration // polling period
 	Logger   *slog.Logger
+
+	dev     string // resolved xpu-smi device id
+	lastErr string // last device-selection error logged
 
 	mu    sync.RWMutex
 	stats XPUStats
@@ -49,11 +58,8 @@ type XPU struct {
 }
 
 // NewXPU creates an XPU poller. Call Run to start polling.
-func NewXPU(path, device string, interval time.Duration, logger *slog.Logger) *XPU {
-	if device == "" {
-		device = "0"
-	}
-	return &XPU{Path: path, Device: device, Interval: interval, Logger: logger, err: ErrNoXPUSample}
+func NewXPU(path, device, pciSlot string, interval time.Duration, logger *slog.Logger) *XPU {
+	return &XPU{Path: path, Device: device, PCISlot: pciSlot, Interval: interval, Logger: logger, err: ErrNoXPUSample}
 }
 
 // Latest implements XPUProvider.
@@ -80,8 +86,27 @@ func (x *XPU) Run(ctx context.Context) {
 }
 
 func (x *XPU) poll(ctx context.Context) {
+	if x.dev == "" {
+		dev, err := x.selectDevice(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			x.mu.Lock()
+			x.err = err
+			x.mu.Unlock()
+			if err.Error() != x.lastErr {
+				x.lastErr = err.Error()
+				x.Logger.Error("xpu-smi device not selected, memory metrics disabled", "error", err)
+			}
+			return
+		}
+		x.dev = dev
+		x.Logger.Info("xpu-smi device selected", "device", dev, "pci_slot", x.PCISlot)
+	}
+
 	if x.total == nil {
-		out, err := x.run(ctx, "discovery", "-d", x.Device, "-j")
+		out, err := x.run(ctx, "discovery", "-d", x.dev, "-j")
 		if err == nil {
 			var total float64
 			if total, err = parseXPUDiscovery(out); err == nil {
@@ -93,7 +118,7 @@ func (x *XPU) poll(ctx context.Context) {
 		}
 	}
 
-	out, err := x.run(ctx, "stats", "-d", x.Device, "-j")
+	out, err := x.run(ctx, "stats", "-d", x.dev, "-j")
 	var used float64
 	if err == nil {
 		used, err = parseXPUStats(out)
@@ -181,4 +206,85 @@ func parseXPUDiscovery(b []byte) (float64, error) {
 		}
 	}
 	return 0, errors.New("xpu-smi discovery reported no memory_physical_size_byte")
+}
+
+// selectDevice returns the xpu-smi device id to poll. With no PCI address to
+// check against, a configured device is used as is.
+func (x *XPU) selectDevice(ctx context.Context) (string, error) {
+	if x.Device != "" && x.PCISlot == "" {
+		return x.Device, nil
+	}
+	out, err := x.run(ctx, "discovery", "-j")
+	if err != nil {
+		return "", err
+	}
+	devs, err := parseXPUDeviceList(out)
+	if err != nil {
+		return "", err
+	}
+	return pickXPUDevice(devs, x.Device, x.PCISlot)
+}
+
+// xpuDevice is one entry of `xpu-smi discovery -j`.
+type xpuDevice struct {
+	ID  string // device_id
+	BDF string // pci_bdf_address, lower case
+}
+
+// parseXPUDeviceList parses the device list printed by `xpu-smi discovery -j`.
+func parseXPUDeviceList(b []byte) ([]xpuDevice, error) {
+	var d struct {
+		DeviceList []struct {
+			DeviceID json.Number `json:"device_id"`
+			BDF      string      `json:"pci_bdf_address"`
+		} `json:"device_list"`
+	}
+	if err := json.Unmarshal(jsonObject(b), &d); err != nil {
+		return nil, fmt.Errorf("parsing xpu-smi discovery: %w", err)
+	}
+	devs := make([]xpuDevice, 0, len(d.DeviceList))
+	for _, e := range d.DeviceList {
+		devs = append(devs, xpuDevice{ID: e.DeviceID.String(), BDF: strings.ToLower(e.BDF)})
+	}
+	return devs, nil
+}
+
+// pickXPUDevice chooses the xpu-smi device for the GPU at PCI address slot.
+//
+//   - want set: it must exist and, if slot is known, be the GPU at slot.
+//   - want empty, slot known: the device at slot.
+//   - want empty, slot unknown: the only device, if there is exactly one.
+//
+// Anything else is an error, so memory is never read from a different GPU
+// than the other metrics.
+func pickXPUDevice(devs []xpuDevice, want, slot string) (string, error) {
+	slot = strings.ToLower(slot)
+	if want != "" {
+		for _, d := range devs {
+			if d.ID != want {
+				continue
+			}
+			if slot != "" && d.BDF != slot {
+				return "", fmt.Errorf("--intel-xpu-device=%s is the GPU at PCI address %s, but the other metrics come from %s", want, d.BDF, slot)
+			}
+			return want, nil
+		}
+		return "", fmt.Errorf("xpu-smi has no device %s", want)
+	}
+	if slot != "" {
+		for _, d := range devs {
+			if d.BDF == slot {
+				return d.ID, nil
+			}
+		}
+		return "", fmt.Errorf("xpu-smi has no device at PCI address %s; set --intel-xpu-device", slot)
+	}
+	switch len(devs) {
+	case 0:
+		return "", errors.New("xpu-smi reports no devices")
+	case 1:
+		return devs[0].ID, nil
+	default:
+		return "", fmt.Errorf("xpu-smi reports %d devices and the PCI address of the selected GPU is unknown; set --intel-xpu-device", len(devs))
+	}
 }

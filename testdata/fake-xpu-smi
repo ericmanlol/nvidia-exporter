@@ -1,5 +1,9 @@
 #!/bin/bash
-# Test stand-in for xpu-smi: `discovery ... -j` and `stats ... -j` print fixtures.
+# Test stand-in for xpu-smi: `discovery -j` prints the device list,
+# `discovery -d N -j` and `stats -d N -j` print one device's fixtures.
+#   FAKE_XPU_FAIL=1       exit with an error
+#   FAKE_XPU_LIST_FILE    device list to print instead of the default fixture
+#   FAKE_XPU_ARGS_FILE    append each call's arguments here
 dir="$(dirname "$0")"
 if [ "$FAKE_XPU_FAIL" = "1" ]; then
   echo "xpu-smi: cannot connect to the XPU Manager daemon" >&2
@@ -7,7 +11,12 @@ if [ "$FAKE_XPU_FAIL" = "1" ]; then
 fi
 echo "$@" >> "${FAKE_XPU_ARGS_FILE:-/dev/null}"
 case "$1" in
-  discovery) cat "$dir/xpu-smi-discovery.json" ;;
-  stats)     cat "$dir/xpu-smi-stats.json" ;;
+  discovery)
+    if [ "$2" = "-d" ]; then
+      cat "$dir/xpu-smi-discovery.json"
+    else
+      cat "${FAKE_XPU_LIST_FILE:-$dir/xpu-smi-discovery-list.json}"
+    fi ;;
+  stats) cat "$dir/xpu-smi-stats.json" ;;
   *) exit 2 ;;
 esac

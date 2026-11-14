@@ -4,7 +4,6 @@ import (
 	"errors"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -76,29 +75,6 @@ func FindHwmon(sysRoot, pciSlot string) (string, error) {
 		}
 	}
 	return "", ErrNoHwmon
-}
-
-// PCISlotFromDevice extracts the PCI address from an intel_gpu_top device
-// filter such as "pci:slot=0000:00:10.0" or "sys:/sys/devices/pci0000:00/0000:00:10.0/drm/card1".
-// It returns "" when no address can be found (for example "drm:/dev/dri/renderD128").
-func PCISlotFromDevice(filter string) string {
-	if i := strings.Index(filter, "slot="); i >= 0 {
-		s := filter[i+len("slot="):]
-		if j := strings.IndexAny(s, ",;"); j >= 0 {
-			s = s[:j]
-		}
-		return s
-	}
-	if strings.HasPrefix(filter, "sys:") {
-		parts := strings.Split(filter, "/")
-		for i := len(parts) - 1; i >= 0; i-- {
-			p := parts[i]
-			if len(p) == 12 && p[4] == ':' && p[7] == ':' && p[10] == '.' {
-				return p
-			}
-		}
-	}
-	return ""
 }
 
 // Read takes one reading. Power is derived from the energy counter delta since

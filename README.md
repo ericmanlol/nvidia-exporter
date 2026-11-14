@@ -53,10 +53,10 @@ go build -o bin/nvidia-exporter ./cmd/nvidia-exporter
 | `--amd-sysfs-root` | `/sys` | sysfs mount point to find amdgpu devices under (`--backend=amd`), e.g. `/host/sys` in a container |
 | `--nvidia-smi-path` | `nvidia-smi` | Path to nvidia-smi binary |
 | `--intel-gpu-top-path` | `intel_gpu_top` | Path to intel_gpu_top binary (`--backend=intel`) |
-| `--intel-device` | _(first GPU)_ | intel_gpu_top `-d` device filter, e.g. `drm:/dev/dri/renderD128` (`--backend=intel`) |
-| `--intel-hwmon` | `auto` | Intel GPU hwmon directory for power/energy/temperature/fan (`--backend=intel`): `auto` (find the Intel GPU under `/sys/class/drm`), `off`, or a path such as `/sys/class/drm/card1/device/hwmon/hwmon5` |
+| `--intel-device` | _(see [Choosing the GPU](#choosing-the-gpu))_ | intel_gpu_top `-d` device filter, e.g. `drm:/dev/dri/renderD128` or `pci:slot=0000:03:00.0` (`--backend=intel`) |
+| `--intel-hwmon` | `auto` | Intel GPU hwmon directory for power/energy/temperature/fan (`--backend=intel`): `auto` (the hwmon of the selected GPU), `off`, or a path such as `/sys/class/drm/card1/device/hwmon/hwmon5` |
 | `--intel-xpu-smi-path` | _(off)_ | Path to Intel `xpu-smi`; when set, GPU memory used/total is exported (`--backend=intel`; needs root and a working `xpu-smi`) |
-| `--intel-xpu-device` | `0` | `xpu-smi` device id used with `--intel-xpu-smi-path` |
+| `--intel-xpu-device` | _(matched by PCI address)_ | `xpu-smi` device id used with `--intel-xpu-smi-path` |
 | `--collect-interval` | `10s` | Interval between metric collections (sampling period for `--backend=intel`) |
 | `--log-level` | `info` | Log level (debug, info, warn, error) |
 
@@ -151,7 +151,14 @@ Requirements:
 - `intel_gpu_top` does not report power on discrete Arc cards (and never reports VRAM). Power, temperature and fan data come from the i915/xe **hwmon** interface instead (`--intel-hwmon`, on by default when an Intel GPU hwmon directory is found). Which sensors exist depends on the card and kernel: the `hwmon_*` metrics other than energy are only emitted if the driver provides them. hwmon is read at scrape time and works even if `intel_gpu_top` is failing.
 - Neither `intel_gpu_top` nor hwmon reports memory use on Arc. With `--intel-xpu-smi-path=xpu-smi` the exporter polls `xpu-smi stats -d <id> -j` every collection interval for used memory, and reads the physical size once from `xpu-smi discovery -d <id> -j`. Like hwmon, it is independent of `intel_gpu_top`. It is off by default because it needs Intel's `xpu-smi` installed.
 - Power is derived from the `energy1_input` counter between two scrapes, so it appears from the second scrape on. `rate(intel_gpu_hwmon_energy_joules_total[5m])` gives the same number in Prometheus.
-- With `--intel-device pci:slot=0000:00:10.0` (or a `sys:` path) the hwmon of that PCI device is used; otherwise the first Intel GPU.
+
+### Choosing the GPU
+
+`intel_gpu_top`, hwmon and `xpu-smi` each number GPUs their own way. On a machine with more than one Intel GPU, the exporter matches them by PCI address, so that one scrape never combines readings from different GPUs:
+
+- **`--intel-device` set:** the exporter finds the PCI device the filter selects. `pci:slot=`, `drm:` (`/dev/dri/cardN`, `/dev/dri/renderDN` or a `/dev/dri/by-path` link) and `sys:` filters are supported. hwmon and `xpu-smi` then read that device. If the filter doesn't name a single PCI device (for example `pci:vendor=8086,device=56a6`), automatic hwmon is disabled rather than reading another GPU. Set `--intel-hwmon` to the GPU's hwmon directory to use it anyway.
+- **`--intel-device` not set:** the exporter uses the first Intel GPU with an i915/xe hwmon, and starts `intel_gpu_top` with `-d pci:slot=<its address>` so that it reads the same GPU. If no hwmon is found, `intel_gpu_top` picks the GPU itself, as before.
+- **`xpu-smi`:** with `--intel-xpu-device` unset, the `xpu-smi` device at the same PCI address is used (from `xpu-smi discovery -j`). If the PCI address is unknown, the only `xpu-smi` device is used, if there is exactly one. A `--intel-xpu-device` that is a different GPU is rejected: memory metrics are left out and `intel_exporter_xpu_error` is 1.
 
 ### Intel utilization
 

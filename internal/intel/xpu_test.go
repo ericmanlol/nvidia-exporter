@@ -64,7 +64,7 @@ func TestXPU_RunPollsFakeTool(t *testing.T) {
 	argsFile := filepath.Join(t.TempDir(), "args")
 	t.Setenv("FAKE_XPU_ARGS_FILE", argsFile)
 
-	x := NewXPU(fake, "0", time.Second, testLogger())
+	x := NewXPU(fake, "0", "", time.Second, testLogger())
 	if _, _, err := x.Latest(); err != ErrNoXPUSample {
 		t.Fatalf("before first poll: %v", err)
 	}
@@ -101,10 +101,110 @@ func TestXPU_RunPollsFakeTool(t *testing.T) {
 func TestXPU_ReportsToolFailure(t *testing.T) {
 	fake, _ := filepath.Abs("../../testdata/fake-xpu-smi")
 	t.Setenv("FAKE_XPU_FAIL", "1")
-	x := NewXPU(fake, "0", time.Second, testLogger())
+	x := NewXPU(fake, "0", "", time.Second, testLogger())
 	x.poll(context.Background())
 	_, _, err := x.Latest()
 	if err == nil || err == ErrNoXPUSample || !strings.Contains(err.Error(), "XPU Manager daemon") {
 		t.Errorf("err = %v, want the tool's stderr", err)
+	}
+}
+
+func TestParseXPUDeviceList(t *testing.T) {
+	b, err := os.ReadFile("../../testdata/xpu-smi-discovery-list.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	devs, err := parseXPUDeviceList(append([]byte("WARNING: something\n"), b...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devs) != 1 || devs[0] != (xpuDevice{ID: "0", BDF: "0000:00:10.0"}) {
+		t.Errorf("got %+v", devs)
+	}
+	if _, err := parseXPUDeviceList([]byte("not json")); err == nil {
+		t.Error("want error for invalid JSON")
+	}
+}
+
+func TestPickXPUDevice(t *testing.T) {
+	two := []xpuDevice{{ID: "0", BDF: "0000:03:00.0"}, {ID: "1", BDF: "0000:04:00.0"}}
+	one := two[:1]
+	cases := []struct {
+		name       string
+		devs       []xpuDevice
+		want, slot string
+		dev        string // "" = error
+	}{
+		{"match by slot", two, "", "0000:04:00.0", "1"},
+		{"match by slot, upper case", []xpuDevice{{ID: "1", BDF: "0000:0a:00.0"}}, "", "0000:0A:00.0", "1"},
+		{"no device at slot", two, "", "0000:05:00.0", ""},
+		{"explicit, same GPU", two, "1", "0000:04:00.0", "1"},
+		{"explicit, different GPU", two, "0", "0000:04:00.0", ""},
+		{"explicit, missing", two, "7", "", ""},
+		{"explicit, slot unknown", two, "0", "", "0"},
+		{"auto, slot unknown, one device", one, "", "", "0"},
+		{"auto, slot unknown, two devices", two, "", "", ""},
+		{"no devices", nil, "", "", ""},
+	}
+	for _, c := range cases {
+		dev, err := pickXPUDevice(c.devs, c.want, c.slot)
+		if c.dev == "" {
+			if err == nil {
+				t.Errorf("%s: got device %q, want an error", c.name, dev)
+			}
+			continue
+		}
+		if err != nil || dev != c.dev {
+			t.Errorf("%s: got %q, %v; want %q", c.name, dev, err, c.dev)
+		}
+	}
+}
+
+func writeDeviceList(t *testing.T, devs string) string {
+	t.Helper()
+	f := filepath.Join(t.TempDir(), "list.json")
+	if err := os.WriteFile(f, []byte(`{"device_list":[`+devs+`]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// With no --intel-xpu-device, the xpu-smi device at the selected GPU's PCI
+// address is polled.
+func TestXPU_SelectsDeviceByPCISlot(t *testing.T) {
+	fake, _ := filepath.Abs("../../testdata/fake-xpu-smi")
+	argsFile := filepath.Join(t.TempDir(), "args")
+	t.Setenv("FAKE_XPU_ARGS_FILE", argsFile)
+	t.Setenv("FAKE_XPU_LIST_FILE", writeDeviceList(t,
+		`{"device_id":0,"pci_bdf_address":"0000:03:00.0"},{"device_id":1,"pci_bdf_address":"0000:04:00.0"}`))
+
+	x := NewXPU(fake, "", "0000:04:00.0", time.Second, testLogger())
+	x.poll(context.Background())
+	if _, _, err := x.Latest(); err != nil {
+		t.Fatalf("Latest: %v", err)
+	}
+	args, _ := os.ReadFile(argsFile)
+	if !strings.Contains(string(args), "stats -d 1 -j") {
+		t.Errorf("want stats for device 1; calls:\n%s", args)
+	}
+}
+
+// A configured xpu-smi device that is a different GPU than the other sources
+// read is an error, and is not polled.
+func TestXPU_RejectsDeviceOfAnotherGPU(t *testing.T) {
+	fake, _ := filepath.Abs("../../testdata/fake-xpu-smi")
+	argsFile := filepath.Join(t.TempDir(), "args")
+	t.Setenv("FAKE_XPU_ARGS_FILE", argsFile)
+	t.Setenv("FAKE_XPU_LIST_FILE", writeDeviceList(t,
+		`{"device_id":0,"pci_bdf_address":"0000:03:00.0"},{"device_id":1,"pci_bdf_address":"0000:04:00.0"}`))
+
+	x := NewXPU(fake, "0", "0000:04:00.0", time.Second, testLogger())
+	x.poll(context.Background())
+	_, _, err := x.Latest()
+	if err == nil || !strings.Contains(err.Error(), "0000:03:00.0") {
+		t.Errorf("err = %v, want a device mismatch error", err)
+	}
+	if args, _ := os.ReadFile(argsFile); strings.Contains(string(args), "stats") {
+		t.Errorf("xpu-smi stats was called for the wrong GPU; calls:\n%s", args)
 	}
 }
