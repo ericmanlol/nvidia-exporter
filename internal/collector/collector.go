@@ -27,10 +27,11 @@ type Collector struct {
 	legacy   bool
 	common   *commonDescs
 
-	mu         sync.RWMutex
-	stats      []nvidia.GPUStats
-	lastUpdate time.Time
-	lastError  error
+	mu           sync.RWMutex
+	stats        []nvidia.GPUStats
+	lastUpdate   time.Time
+	lastError    error
+	lastDuration *time.Duration // nil until a collection attempt completes
 
 	// GPU metric descriptors
 	gpuUtilization *prometheus.Desc
@@ -181,6 +182,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	stats := c.stats
 	lastUpdate := c.lastUpdate
 	lastError := c.lastError
+	lastDuration := c.lastDuration
 	c.mu.RUnlock()
 	// Retain cached values for compatibility, but never advertise missing or
 	// stale data as healthy. Repeated Add calls avoid duration multiplication overflow.
@@ -218,6 +220,9 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	// Emit exporter meta metrics
+	if lastDuration != nil {
+		ch <- prometheus.MustNewConstMetric(c.collectDuration, prometheus.GaugeValue, lastDuration.Seconds())
+	}
 	if !lastUpdate.IsZero() {
 		ch <- prometheus.MustNewConstMetric(c.collectTimestamp, prometheus.GaugeValue, float64(lastUpdate.Unix()))
 	}
@@ -252,7 +257,7 @@ func (c *Collector) Run(ctx context.Context) {
 
 // collect performs a single collection.
 func (c *Collector) collect(ctx context.Context) {
-	start := time.Now()
+	start := c.now()
 
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
@@ -261,9 +266,10 @@ func (c *Collector) collect(ctx context.Context) {
 		err = errors.Join(err, ctx.Err())
 	}
 
-	duration := time.Since(start)
+	duration := c.now().Sub(start)
 
 	c.mu.Lock()
+	c.lastDuration = &duration
 	if err != nil {
 		c.logger.Error("collection failed", "error", err, "duration", duration)
 		c.lastError = err

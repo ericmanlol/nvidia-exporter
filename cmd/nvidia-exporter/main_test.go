@@ -53,6 +53,19 @@ func TestCommandRejectsInvalidConfiguration(t *testing.T) {
 		{"zero timeout", "--nvidia-smi-timeout=0", "--nvidia-smi-timeout must be greater than zero"},
 		{"negative timeout", "--nvidia-smi-timeout=-1s", "--nvidia-smi-timeout must be greater than zero"},
 		{"unknown backend", "--backend=unknown", "unknown backend"},
+		{"root metrics path", "--metrics-path=/", "--metrics-path"},
+		{"health metrics path", "--metrics-path=/health", "--metrics-path"},
+		{"empty metrics path", "--metrics-path=", "--metrics-path"},
+		{"relative metrics path", "--metrics-path=metrics", "--metrics-path"},
+		{"method pattern", "--metrics-path=GET /metrics", "--metrics-path"},
+		{"wildcard pattern", "--metrics-path=/{metrics}", "--metrics-path"},
+		{"invalid pattern", "--metrics-path=/{", "--metrics-path"},
+		{"invalid escape", "--metrics-path=/%zz", "--metrics-path"},
+		{"encoded path", "--metrics-path=/%6detrics", "--metrics-path"},
+		{"query string", "--metrics-path=/metrics?x=1", "--metrics-path"},
+		{"fragment", "--metrics-path=/metrics#x", "--metrics-path"},
+		{"unclean path", "--metrics-path=/a/../metrics", "--metrics-path"},
+		{"repeated slash", "--metrics-path=//metrics", "--metrics-path"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := command(t, tc.flag, "--listen-address=invalid-address").CombinedOutput()
@@ -161,7 +174,12 @@ func TestCommandShutdownReapsHungNvidia(t *testing.T) {
 			child.Release()
 		}
 	})
-	client := &http.Client{Timeout: 200 * time.Millisecond}
+	// This test isolates worker shutdown. Do not leave speculative pooled HTTP
+	// connections waiting for request headers during Server.Shutdown.
+	client := &http.Client{
+		Timeout:   200 * time.Millisecond,
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
 	defer client.CloseIdleConnections()
 	waitFor(t, "HTTP readiness", func() bool {
 		resp, err := client.Get("http://" + address + "/health")
