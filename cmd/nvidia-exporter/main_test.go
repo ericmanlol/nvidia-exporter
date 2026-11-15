@@ -124,6 +124,15 @@ func waitFor(t *testing.T, description string, ready func() bool) {
 }
 
 func TestCommandShutdownReapsHungNvidia(t *testing.T) {
+	testCommandShutdownReapsHungGPU(t, "nvidia")
+}
+
+func TestCommandShutdownReapsHungIntel(t *testing.T) {
+	testCommandShutdownReapsHungGPU(t, "intel")
+}
+
+func testCommandShutdownReapsHungGPU(t *testing.T, backend string) {
+	t.Helper()
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "pid")
 	tool := filepath.Join(dir, "nvidia-smi")
@@ -133,7 +142,13 @@ func TestCommandShutdownReapsHungNvidia(t *testing.T) {
 		t.Fatal(err)
 	}
 	address := unusedAddress(t)
-	cmd := command(t, "--listen-address="+address, "--nvidia-smi-path="+tool, "--nvidia-smi-timeout=1m")
+	args := []string{"--listen-address=" + address, "--backend=" + backend}
+	if backend == "intel" {
+		args = append(args, "--intel-gpu-top-path="+tool, "--intel-hwmon=off", "--collect-interval=1m")
+	} else {
+		args = append(args, "--nvidia-smi-path="+tool, "--nvidia-smi-timeout=1m")
+	}
+	cmd := command(t, args...)
 	cmd.Env = append(cmd.Env, "EXPORTER_TEST_PID_FILE="+pidFile)
 	var output bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &output, &output
@@ -160,8 +175,16 @@ func TestCommandShutdownReapsHungNvidia(t *testing.T) {
 			child.Kill()
 			child.Release()
 		}
+		if t.Failed() {
+			t.Logf("exporter output:\n%s", output.String())
+		}
 	})
-	client := &http.Client{Timeout: 200 * time.Millisecond}
+	// This test isolates worker shutdown. Do not leave speculative pooled HTTP
+	// connections waiting for request headers during Server.Shutdown.
+	client := &http.Client{
+		Timeout:   200 * time.Millisecond,
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
 	defer client.CloseIdleConnections()
 	waitFor(t, "HTTP readiness", func() bool {
 		resp, err := client.Get("http://" + address + "/health")
@@ -172,7 +195,7 @@ func TestCommandShutdownReapsHungNvidia(t *testing.T) {
 		return resp.StatusCode == http.StatusOK
 	})
 	var childPID int
-	waitFor(t, "NVIDIA child startup", func() bool {
+	waitFor(t, backend+" child startup", func() bool {
 		b, err := os.ReadFile(pidFile)
 		if err != nil {
 			return false
@@ -180,7 +203,8 @@ func TestCommandShutdownReapsHungNvidia(t *testing.T) {
 		childPID, err = strconv.Atoi(strings.TrimSpace(string(b)))
 		return err == nil && childPID > 0
 	})
-	child, err := os.FindProcess(childPID)
+	var err error
+	child, err = os.FindProcess(childPID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +217,7 @@ func TestCommandShutdownReapsHungNvidia(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), `gpu_exporter_collection_error{vendor="nvidia"} 1`) {
+	if !strings.Contains(string(body), fmt.Sprintf(`gpu_exporter_collection_error{vendor=%q} 1`, backend)) {
 		t.Fatalf("initial hung collection advertised healthy:\n%s", body)
 	}
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
@@ -206,9 +230,9 @@ func TestCommandShutdownReapsHungNvidia(t *testing.T) {
 			t.Fatalf("shutdown exit = %v\n%s", err, output.String())
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("shutdown blocked on NVIDIA command")
+		t.Fatalf("shutdown blocked on %s command", backend)
 	}
 	if err := syscall.Kill(childPID, 0); err != syscall.ESRCH {
-		t.Fatalf("NVIDIA child %d was not reaped: %v", childPID, err)
+		t.Fatalf("%s child %d was not reaped: %v", backend, childPID, err)
 	}
 }
