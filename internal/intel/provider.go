@@ -25,6 +25,19 @@ const restartDelay = 5 * time.Second
 // its output pipes to close, after it has been killed or has exited.
 const waitDelay = 5 * time.Second
 
+// SampleTimeout is the maximum time to wait for the first or next complete
+// intel_gpu_top sample: three sampling periods plus a five-second margin.
+// It accounts for the tool's minimum period and saturates instead of overflowing.
+func SampleTimeout(interval time.Duration) time.Duration {
+	interval = max(interval, 100*time.Millisecond)
+	const margin = 5 * time.Second
+	const maximum = time.Duration(1<<63 - 1)
+	if interval > (maximum-margin)/3 {
+		return maximum
+	}
+	return 3*interval + margin
+}
+
 // Provider returns the most recent intel_gpu_top sample.
 type Provider interface {
 	// Latest returns the newest sample and when it was received. The error is
@@ -41,7 +54,8 @@ type GPUTopProvider struct {
 	Interval time.Duration // sampling period (-s)
 	Logger   *slog.Logger
 
-	restartDelay time.Duration // tests shorten it
+	restartDelay  time.Duration // tests shorten it
+	sampleTimeout time.Duration
 
 	mu     sync.RWMutex
 	sample Sample
@@ -58,7 +72,8 @@ func NewGPUTopProvider(path, device string, interval time.Duration, logger *slog
 		Logger:   logger,
 		err:      ErrNoSample,
 
-		restartDelay: restartDelay,
+		restartDelay:  restartDelay,
+		sampleTimeout: SampleTimeout(interval),
 	}
 }
 
@@ -81,7 +96,8 @@ func (p *GPUTopProvider) Latest() (Sample, time.Time, error) {
 	return p.sample, p.at, p.err
 }
 
-// Run starts intel_gpu_top and restarts it if it exits, until ctx is cancelled.
+// Run starts intel_gpu_top and restarts it if it exits or stops producing
+// complete samples, until ctx is cancelled.
 func (p *GPUTopProvider) Run(ctx context.Context) {
 	for {
 		err := p.runOnce(ctx)
@@ -116,11 +132,44 @@ func (p *GPUTopProvider) runOnce(ctx context.Context) error {
 	}
 	p.Logger.Info("started intel_gpu_top", "args", strings.Join(p.args(), " "))
 
-	readErr := p.readStream(stdout)
-	if readErr != nil {
-		// The output can no longer be decoded, but intel_gpu_top may still be
-		// running. Kill it so Wait returns and Run can start a fresh process.
-		_ = cmd.Process.Kill()
+	// Decoding can block even when the child remains alive. Supervise complete
+	// samples, rather than bytes, so a truncated JSON object cannot keep it alive.
+	samples := make(chan struct{}, 1)
+	readDone := make(chan error, 1)
+	go func() {
+		readDone <- p.readSamples(stdout, func() {
+			select {
+			case samples <- struct{}{}:
+			default:
+			}
+		})
+	}()
+	timer := time.NewTimer(p.sampleTimeout)
+	defer timer.Stop()
+	var readErr error
+	reading := true
+stream:
+	for {
+		select {
+		case readErr = <-readDone:
+			reading = false
+			break stream
+		case <-samples:
+			timer.Reset(p.sampleTimeout)
+		case <-timer.C:
+			readErr = fmt.Errorf("no complete intel_gpu_top sample for %s", p.sampleTimeout)
+			break stream
+		case <-ctx.Done():
+			readErr = ctx.Err()
+			break stream
+		}
+	}
+	// Close our read end as well as killing the child: descendants may have
+	// inherited stdout. Join the reader before Wait closes the command's pipes.
+	_ = cmd.Process.Kill()
+	_ = stdout.Close()
+	if reading {
+		<-readDone
 	}
 	waitErr := cmd.Wait()
 	if ctx.Err() != nil {
@@ -141,6 +190,10 @@ func (p *GPUTopProvider) runOnce(ctx context.Context) error {
 // readStream decodes the JSON array that intel_gpu_top -J prints, one object
 // per sampling period, and stores each object as the latest sample.
 func (p *GPUTopProvider) readStream(r io.Reader) error {
+	return p.readSamples(r, func() {})
+}
+
+func (p *GPUTopProvider) readSamples(r io.Reader, onSample func()) error {
 	dec := json.NewDecoder(r)
 
 	tok, err := dec.Token()
@@ -163,6 +216,7 @@ func (p *GPUTopProvider) readStream(r io.Reader) error {
 		p.at = time.Now()
 		p.err = nil
 		p.mu.Unlock()
+		onSample()
 	}
 	return nil
 }

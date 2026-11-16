@@ -119,7 +119,7 @@ func run(parent context.Context, args []string) error {
 		sel := intel.Select("/sys", *intelDevice, *intelHwmon, logger)
 		provider := intel.NewGPUTopProvider(*intelGPUTopPath, sel.GPUTopDevice, *collectInterval, logger)
 		// A sample is stale after three sampling periods plus a startup margin.
-		coll := collector.NewIntel(provider, device, 3**collectInterval+5*time.Second).SetLegacy(*legacyMetrics)
+		coll := collector.NewIntel(provider, device, intel.SampleTimeout(*collectInterval)).SetLegacy(*legacyMetrics)
 		if hw := openHwmon(sel.HwmonDir, logger); hw != nil {
 			coll.WithHwmon(hw)
 		}

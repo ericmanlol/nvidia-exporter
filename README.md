@@ -184,6 +184,16 @@ Requirements:
 - **`--intel-device` not set:** the exporter uses the first Intel GPU with an i915/xe hwmon, and starts `intel_gpu_top` with `-d pci:slot=<its address>` so that it reads the same GPU. If no hwmon is found, `intel_gpu_top` picks the GPU itself, as before.
 - **`xpu-smi`:** with `--intel-xpu-device` unset, the `xpu-smi` device at the same PCI address is used (from `xpu-smi discovery -j`). If the PCI address is unknown, the only `xpu-smi` device is used, if there is exactly one. A `--intel-xpu-device` that is a different GPU is rejected: memory metrics are left out and `intel_exporter_xpu_error` is 1.
 
+### Intel collection recovery
+
+The exporter restarts `intel_gpu_top` if it exits, emits invalid JSON, or stops
+producing complete samples. The inactivity deadline is three sampling periods
+plus five seconds (35s by default), using at least the tool's minimum 100ms
+sampling period. The same deadline determines sample freshness. A stalled
+process is killed and reaped before the usual five-second restart delay;
+collection health clears when a fresh sample arrives. Cancellation also stops
+a process that has not produced its first sample.
+
 ### Intel utilization
 
 `nvidia-smi`'s utilization is the share of time *any* engine was busy. `intel_gpu_top` only reports busy time per engine (render, video, video enhance, blitter, compute), and engines run at the same time, so the overall value is not reported directly. `gpu_utilization_ratio` for Intel is estimated as:
