@@ -61,6 +61,11 @@ go build -o bin/nvidia-exporter ./cmd/nvidia-exporter
 | `--collect-interval` | `10s` | Interval between metric collections (sampling period for `--backend=intel`); must be positive |
 | `--log-level` | `info` | Log level (debug, info, warn, error) |
 
+`--metrics-path` must be a literal, canonical absolute URL path, such as
+`/metrics` or `/telemetry/metrics`. `/` and `/health` are reserved. Queries,
+fragments, encoded paths, routing wildcards and paths requiring cleanup are
+rejected before the listener or collection workers start.
+
 ### Collection health and shutdown
 
 For NVIDIA, each collection has a `--nvidia-smi-timeout` deadline (default `5s`).
@@ -140,6 +145,11 @@ The metrics below are **legacy**: they duplicate the common metrics and are only
 | `nvidia_gpu_clock_memory_hz` | `gpu_clock_memory_hz` |
 | `nvidia_exporter_last_collection_timestamp_seconds` | `gpu_exporter_last_collection_timestamp_seconds` |
 | `nvidia_exporter_collection_error` | `gpu_exporter_collection_error` |
+
+With `--legacy-metrics=true`, `nvidia_exporter_collection_duration_seconds`
+also reports the duration of the last completed NVIDIA collection attempt,
+including failed or timed-out attempts. It is absent before the first attempt
+completes and remains unchanged while the next attempt runs.
 
 ## AMD GPUs
 

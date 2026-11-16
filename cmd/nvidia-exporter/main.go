@@ -5,11 +5,15 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"path"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -63,6 +67,9 @@ func run(parent context.Context, args []string) error {
 	}
 	if *backend != "nvidia" && *backend != "intel" && *backend != "amd" {
 		return fmt.Errorf("unknown backend %q, want nvidia, amd or intel", *backend)
+	}
+	if err := validateMetricsPath(*metricsPath); err != nil {
+		return err
 	}
 	// Bind before starting workers: a startup failure must leave no collectors running.
 	listener, err := net.Listen("tcp", *listenAddress)
@@ -166,7 +173,7 @@ func run(parent context.Context, args []string) error {
 <p><a href="%s">Metrics</a></p>
 </body>
 </html>
-`, title, title, *metricsPath)
+`, title, title, html.EscapeString(*metricsPath))
 	})
 
 	// Metrics endpoint
@@ -217,6 +224,21 @@ func run(parent context.Context, args []string) error {
 		logger.Info("shutdown complete")
 	}
 	return errors.Join(serveErr, shutdownErr)
+}
+
+// validateMetricsPath accepts literal, canonical URL paths rather than ServeMux
+// method/host patterns or wildcards. Validate before binding or starting workers.
+func validateMetricsPath(metricsPath string) error {
+	if metricsPath == "/" || metricsPath == "/health" {
+		return fmt.Errorf("--metrics-path %q is reserved for a built-in endpoint", metricsPath)
+	}
+	u, err := url.ParseRequestURI(metricsPath)
+	if err != nil || !strings.HasPrefix(metricsPath, "/") ||
+		u.Path != metricsPath || strings.ContainsAny(metricsPath, "{}?# \t\r\n") ||
+		path.Clean(metricsPath) != strings.TrimSuffix(metricsPath, "/") {
+		return fmt.Errorf("--metrics-path must be a literal, canonical absolute URL path: %q", metricsPath)
+	}
+	return nil
 }
 
 // openHwmon opens the hwmon directory chosen by intel.Select. It returns nil
