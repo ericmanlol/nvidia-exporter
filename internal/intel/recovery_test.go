@@ -52,12 +52,12 @@ func TestProviderRecoversFromSilentStream(t *testing.T) {
 if [ ! -e "$INTEL_TEST_STARTED" ]; then
   touch "$INTEL_TEST_STARTED"
   case "$INTEL_TEST_MODE" in
-    "after sample") printf '[{"frequency":{"actual":100}},' ;;
+    "after sample") printf '[{"period":{"duration":1000},"frequency":{"actual":100}},' ;;
     "partial sample") printf '[{"frequency":' ;;
   esac
   exec sleep 60
 fi
-printf '[{"frequency":{"actual":900}},'
+printf '[{"period":{"duration":1000},"frequency":{"actual":900}},'
 exec sleep 60
 `)
 			p := NewGPUTopProvider(tool, "", time.Second, testLogger())
@@ -78,7 +78,7 @@ exec sleep 60
 			if mode == "after sample" {
 				waitIntel(t, "initial sample", func() bool {
 					s, _, err := p.Latest()
-					return err == nil && s.FrequencyActual == 100
+					return err == nil && s.FrequencyActual != nil && *s.FrequencyActual == 100
 				})
 			}
 			waitIntel(t, "inactivity error", func() bool {
@@ -87,7 +87,7 @@ exec sleep 60
 			})
 			waitIntel(t, "sample from restarted process", func() bool {
 				s, _, err := p.Latest()
-				return err == nil && s.FrequencyActual == 900
+				return err == nil && s.FrequencyActual != nil && *s.FrequencyActual == 900
 			})
 			b, err := os.ReadFile(pids)
 			if err != nil {
@@ -111,7 +111,7 @@ exec sleep 60
 func TestProviderResetsDeadlineForCompleteSamples(t *testing.T) {
 	tool := streamTool(t, `printf '['
 for n in 1 2 3 4 5 6 7 8 9 10; do
-  printf '{"frequency":{"actual":%s}},' "$n"
+  printf '{"period":{"duration":1000},"frequency":{"actual":%s}},' "$n"
   sleep 0.05
 done
 exec sleep 60
@@ -131,7 +131,7 @@ exec sleep 60
 	})
 	waitIntel(t, "tenth sample beyond the initial deadline", func() bool {
 		s, _, err := p.Latest()
-		return err == nil && s.FrequencyActual == 10
+		return err == nil && s.FrequencyActual != nil && *s.FrequencyActual == 10
 	})
 	select {
 	case err := <-done:

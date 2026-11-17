@@ -245,8 +245,12 @@ func (c *IntelCollector) Collect(ch chan<- prometheus.Metric) {
 	s, at, err := c.provider.Latest()
 	fresh := err == nil && c.now().Sub(at) <= c.maxAge
 	if fresh {
-		cs.Utilization = f64(intelUtilization(s))
-		cs.ClockGraphics = f64(s.FrequencyActual * 1e6)
+		if len(s.Engines) > 0 {
+			cs.Utilization = f64(intelUtilization(s))
+		}
+		if s.FrequencyActual != nil {
+			cs.ClockGraphics = f64(*s.FrequencyActual * 1e6)
+		}
 		if cs.PowerDraw == nil && s.PowerGPU != nil {
 			cs.PowerDraw = s.PowerGPU
 		}
@@ -273,14 +277,22 @@ func (c *IntelCollector) Collect(ch chan<- prometheus.Metric) {
 
 	for name, e := range s.Engines {
 		gauge(c.engineBusy, e.Busy/100, name)
-		gauge(c.engineSema, e.Sema/100, name)
-		gauge(c.engineWait, e.Wait/100, name)
+		if e.Sema != nil {
+			gauge(c.engineSema, *e.Sema/100, name)
+		}
+		if e.Wait != nil {
+			gauge(c.engineWait, *e.Wait/100, name)
+		}
 	}
-	gauge(c.freqRequested, s.FrequencyRequested*1e6)
+	if s.FrequencyRequested != nil {
+		gauge(c.freqRequested, *s.FrequencyRequested*1e6)
+	}
 	if s.HasRC6 {
 		gauge(c.rc6, s.RC6/100)
 	}
-	gauge(c.interrupts, s.Interrupts)
+	if s.Interrupts != nil {
+		gauge(c.interrupts, *s.Interrupts)
+	}
 	if s.PowerGPU != nil {
 		gauge(c.powerGPU, *s.PowerGPU)
 	}
@@ -295,7 +307,9 @@ func (c *IntelCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	if c.legacy {
-		gauge(c.freqActual, s.FrequencyActual*1e6)
+		if s.FrequencyActual != nil {
+			gauge(c.freqActual, *s.FrequencyActual*1e6)
+		}
 		gauge(c.collectTime, float64(at.Unix()))
 		gauge(c.collectError, 0)
 	}

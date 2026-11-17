@@ -18,9 +18,9 @@ func ptr(v float64) *float64 { return &v }
 func testSample() intel.Sample {
 	return intel.Sample{
 		Period:             5 * time.Second,
-		FrequencyActual:    1180.5,
-		FrequencyRequested: 1200,
-		Interrupts:         1523.5,
+		FrequencyActual:    ptr(1180.5),
+		FrequencyRequested: ptr(1200),
+		Interrupts:         ptr(1523.5),
 		RC6:                62.5,
 		HasRC6:             true,
 		PowerGPU:           ptr(14.25),
@@ -28,7 +28,7 @@ func testSample() intel.Sample {
 		IMCReads:           ptr(100),
 		IMCWrites:          ptr(50),
 		Engines: map[string]intel.EngineStats{
-			"Render/3D/0": {Busy: 37.5, Sema: 1.25, Wait: 2.5},
+			"Render/3D/0": {Busy: 37.5, Sema: ptr(1.25), Wait: ptr(2.5)},
 			"Video/0":     {Busy: 80},
 		},
 	}
