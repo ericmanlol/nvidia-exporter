@@ -20,6 +20,9 @@ var ErrNoXPUSample = errors.New("no xpu-smi reading received yet")
 // xpuTimeout bounds one xpu-smi call. `xpu-smi stats` samples for ~0.2s.
 const xpuTimeout = 20 * time.Second
 
+// xpuWaitDelay bounds output cleanup when descendants inherit stdout/stderr.
+const xpuWaitDelay = time.Second
+
 // XPUStats is what the exporter takes from Intel's xpu-smi. intel_gpu_top and
 // hwmon report no memory use on discrete Arc cards; xpu-smi does.
 type XPUStats struct {
@@ -145,8 +148,9 @@ func (x *XPU) run(ctx context.Context, args ...string) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, x.Path, args...)
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	cmd.WaitDelay = xpuWaitDelay
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("xpu-smi %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("xpu-smi %s: %w: %s", args[0], errors.Join(err, ctx.Err()), strings.TrimSpace(stderr.String()))
 	}
 	return stdout.Bytes(), nil
 }

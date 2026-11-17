@@ -89,6 +89,11 @@ HTTP shutdown and background workers to stop; exceeding that deadline is reporte
 as an error.
 `/health` reports HTTP liveness; use the collection error metrics for GPU health.
 
+With `--backend=intel` and `--intel-xpu-smi-path` enabled, each `xpu-smi`
+command has a 20-second deadline. Output-pipe cleanup may take up to one
+additional second if a descendant inherits stdout or stderr. This bounds
+waiting for output; it does not terminate descendant processes.
+
 ### Endpoints
 
 | Endpoint | Description |
