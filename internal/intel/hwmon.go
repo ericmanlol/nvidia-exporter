@@ -15,7 +15,7 @@ import (
 // counter (and sometimes a power limit, voltage, temperatures and fan speed)
 // through hwmon. Optional values are nil when the driver does not provide them.
 type HwmonStats struct {
-	EnergyJoules float64            // cumulative energy counter (energy1_input, µJ → J)
+	EnergyJoules *float64           // cumulative energy counter (energy1_input, µJ → J)
 	PowerWatts   *float64           // derived from two consecutive energy readings
 	PowerLimit   *float64           // W (power1_max, falling back to power1_cap)
 	VoltageV     *float64           // V (in0_input, mV → V)
@@ -77,27 +77,31 @@ func FindHwmon(sysRoot, pciSlot string) (string, error) {
 	return "", ErrNoHwmon
 }
 
-// Read takes one reading. Power is derived from the energy counter delta since
-// the previous Read, so the first call (and a call less than 100ms after the
-// previous one, or after a counter reset) reports no PowerWatts.
+// Read takes one reading of each independent sensor. Missing or unreadable
+// sensors are omitted; an error means no usable readings were available.
+// Power is derived from consecutive energy readings at least 100ms apart.
+// A missing/invalid energy reading or counter reset restarts the baseline.
 func (h *Hwmon) Read() (HwmonStats, error) {
-	uj, err := sysfs.ReadFloat(filepath.Join(h.dir, "energy1_input"))
-	if err != nil {
-		return HwmonStats{}, err
-	}
-	at := h.now()
-	st := HwmonStats{EnergyJoules: uj / 1e6}
-
+	var st HwmonStats
+	// Serialize the energy read and timestamp with baseline updates so concurrent
+	// scrapes cannot apply their readings in reverse order.
 	h.mu.Lock()
-	if h.havePrev {
-		dt := at.Sub(h.prevAt).Seconds()
-		if dt >= 0.1 && st.EnergyJoules >= h.prevEnergy {
-			w := (st.EnergyJoules - h.prevEnergy) / dt
-			st.PowerWatts = &w
+	if uj, err := sysfs.ReadFloat(filepath.Join(h.dir, "energy1_input")); err == nil {
+		at := h.now()
+		joules := uj / 1e6
+		st.EnergyJoules = &joules
+		if h.havePrev {
+			dt := at.Sub(h.prevAt).Seconds()
+			if dt >= 0.1 && joules >= h.prevEnergy {
+				w := (joules - h.prevEnergy) / dt
+				st.PowerWatts = &w
+			}
 		}
-	}
-	if !h.havePrev || at.Sub(h.prevAt) >= 100*time.Millisecond {
-		h.prevEnergy, h.prevAt, h.havePrev = st.EnergyJoules, at, true
+		if !h.havePrev || joules < h.prevEnergy || at.Sub(h.prevAt) >= 100*time.Millisecond {
+			h.prevEnergy, h.prevAt, h.havePrev = joules, at, true
+		}
+	} else {
+		h.havePrev = false
 	}
 	h.mu.Unlock()
 
@@ -117,5 +121,9 @@ func (h *Hwmon) Read() (HwmonStats, error) {
 		st.FanRPM = &v
 	}
 	st.Temps = sysfs.Temps(h.dir)
+	if st.EnergyJoules == nil && st.PowerLimit == nil && st.VoltageV == nil &&
+		st.FanRPM == nil && len(st.Temps) == 0 {
+		return st, errors.New("no usable hwmon sensor readings")
+	}
 	return st, nil
 }

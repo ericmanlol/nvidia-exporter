@@ -190,7 +190,7 @@ intel_gpu_hwmon_power_limit_watts{device="default"} 31.25
 # HELP intel_gpu_hwmon_temperature_celsius GPU temperature in degrees Celsius from hwmon
 # TYPE intel_gpu_hwmon_temperature_celsius gauge
 intel_gpu_hwmon_temperature_celsius{device="default",sensor="pkg"} 45
-# HELP intel_exporter_hwmon_error 1 if the hwmon sensors could not be read, 0 otherwise (only present when hwmon is enabled)
+# HELP intel_exporter_hwmon_error 1 if no usable hwmon sensor readings are available, 0 otherwise (only present when hwmon is enabled)
 # TYPE intel_exporter_hwmon_error gauge
 intel_exporter_hwmon_error{device="default"} 0
 # HELP intel_exporter_collection_error 1 if there is no fresh intel_gpu_top sample, 0 otherwise

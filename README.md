@@ -182,9 +182,17 @@ Besides the common metrics (labels `gpu`, `name`, `id`):
 Requirements:
 
 - `intel_gpu_top` needs permission to read GPU performance counters: run as root, or grant `CAP_PERFMON` (systemd: `AmbientCapabilities=CAP_PERFMON`), or set `kernel.perf_event_paranoid=0`. It also needs access to `/dev/dri`.
-- `intel_gpu_top` does not report power on discrete Arc cards (and never reports VRAM). Power, temperature and fan data come from the i915/xe **hwmon** interface instead (`--intel-hwmon`, on by default when an Intel GPU hwmon directory is found). Which sensors exist depends on the card and kernel: the `hwmon_*` metrics other than energy are only emitted if the driver provides them. hwmon is read at scrape time and works even if `intel_gpu_top` is failing.
+- `intel_gpu_top` does not report power on discrete Arc cards (and never reports VRAM). Power, temperature and fan data come from the i915/xe **hwmon** interface instead (`--intel-hwmon`, on by default when an Intel GPU hwmon directory is found). Which sensors exist depends on the card and kernel: every sensor is optional, including energy, and is emitted only when readable. hwmon is read at scrape time and works even if `intel_gpu_top` is failing.
 - Neither `intel_gpu_top` nor hwmon reports memory use on Arc. With `--intel-xpu-smi-path=xpu-smi` the exporter polls `xpu-smi stats -d <id> -j` every collection interval for used memory, and reads the physical size once from `xpu-smi discovery -d <id> -j`. Like hwmon, it is independent of `intel_gpu_top`. It is off by default because it needs Intel's `xpu-smi` installed.
-- Power is derived from the `energy1_input` counter between two scrapes, so it appears from the second scrape on. `rate(intel_gpu_hwmon_energy_joules_total[5m])` gives the same number in Prometheus.
+- Power is derived from consecutive readable `energy1_input` counter values at least 100ms apart, so it appears from the second reading on. A failed energy read resets that baseline. `rate(intel_gpu_hwmon_energy_joules_total[5m])` gives the same number in Prometheus.
+
+Hwmon sensors are read independently: a missing energy counter does not suppress
+temperature, fan, voltage or power-limit readings.
+`intel_exporter_hwmon_error` is 1 only when no usable hwmon readings are available;
+it is 0 when at least one sensor is readable, even if others are unavailable.
+A discovered or explicitly configured hwmon reader remains enabled after an
+initial read failure and retries on every scrape. Automatic discovery still
+happens at startup; newly appearing hwmon directories are not rediscovered.
 
 ### Choosing the GPU
 
@@ -240,7 +248,7 @@ The `intel_*` metrics below carry a `device` label (the `--intel-device` value, 
 | `intel_gpu_memory_used_bytes` | gauge | | **Legacy** (`gpu_memory_used_bytes`). GPU memory in use, from `xpu-smi` (only with `--intel-xpu-smi-path`) |
 | `intel_gpu_memory_total_bytes` | gauge | | **Legacy** (`gpu_memory_total_bytes`). Physical GPU memory, from `xpu-smi discovery` (only once discovery has succeeded) |
 | `intel_exporter_xpu_error` | gauge | | 1 if there is no fresh `xpu-smi` reading, 0 otherwise (only present with `--intel-xpu-smi-path`) |
-| `intel_exporter_hwmon_error` | gauge | | 1 if hwmon is enabled but unreadable (only present when hwmon is enabled) |
+| `intel_exporter_hwmon_error` | gauge | | 1 if hwmon is enabled but no usable sensor readings are available (only present when hwmon is enabled) |
 | `intel_exporter_last_collection_timestamp_seconds` | gauge | | **Legacy**. Unix time of the last `intel_gpu_top` sample |
 | `intel_exporter_collection_error` | gauge | | **Legacy** (`gpu_exporter_collection_error`). 1 if there is no fresh sample (process failing, no data yet, or sample older than 3 sampling periods + 5s), 0 otherwise. GPU metrics are omitted while it is 1. |
 

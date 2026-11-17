@@ -109,7 +109,7 @@ func NewIntel(provider intel.Provider, device string, maxAge time.Duration) *Int
 		),
 		hwmonError: prometheus.NewDesc(
 			prometheus.BuildFQName(intelNamespace, "exporter", "hwmon_error"),
-			"1 if the hwmon sensors could not be read, 0 otherwise (only present when hwmon is enabled)",
+			"1 if no usable hwmon sensor readings are available, 0 otherwise (only present when hwmon is enabled)",
 			nil, constLabels,
 		),
 	}
@@ -203,7 +203,7 @@ func (c *IntelCollector) collectHwmon(ch chan<- prometheus.Metric, cs *gpuStats)
 		return
 	}
 	ch <- prometheus.MustNewConstMetric(c.hwmonError, prometheus.GaugeValue, 0)
-	cs.EnergyJoules = f64(st.EnergyJoules)
+	cs.EnergyJoules = st.EnergyJoules
 	cs.PowerDraw = st.PowerWatts
 	cs.PowerLimit = st.PowerLimit
 	cs.Voltage = st.VoltageV
@@ -214,7 +214,9 @@ func (c *IntelCollector) collectHwmon(ch chan<- prometheus.Metric, cs *gpuStats)
 	if !c.legacy {
 		return
 	}
-	ch <- prometheus.MustNewConstMetric(c.hwEnergy, prometheus.CounterValue, st.EnergyJoules)
+	if st.EnergyJoules != nil {
+		ch <- prometheus.MustNewConstMetric(c.hwEnergy, prometheus.CounterValue, *st.EnergyJoules)
+	}
 	opt := func(d *prometheus.Desc, v *float64) {
 		if v != nil {
 			ch <- prometheus.MustNewConstMetric(d, prometheus.GaugeValue, *v)
