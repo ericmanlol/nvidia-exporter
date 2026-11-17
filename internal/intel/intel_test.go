@@ -48,10 +48,10 @@ func TestParseSample(t *testing.T) {
 	if s.Period != 5000211*time.Microsecond {
 		t.Errorf("Period = %v", s.Period)
 	}
-	if s.FrequencyActual != 1180.5 || s.FrequencyRequested != 1200 {
+	if s.FrequencyActual == nil || *s.FrequencyActual != 1180.5 || s.FrequencyRequested == nil || *s.FrequencyRequested != 1200 {
 		t.Errorf("frequency = %v / %v", s.FrequencyActual, s.FrequencyRequested)
 	}
-	if s.Interrupts != 1523.5 || s.RC6 != 62.5 || !s.HasRC6 {
+	if s.Interrupts == nil || *s.Interrupts != 1523.5 || s.RC6 != 62.5 || !s.HasRC6 {
 		t.Errorf("interrupts = %v, rc6 = %v", s.Interrupts, s.RC6)
 	}
 	if s.PowerGPU == nil || *s.PowerGPU != 14.25 || s.PowerPackage == nil || *s.PowerPackage != 28.5 {
@@ -63,7 +63,7 @@ func TestParseSample(t *testing.T) {
 	if len(s.Engines) != 2 {
 		t.Fatalf("got %d engines, want 2", len(s.Engines))
 	}
-	if e := s.Engines["Render/3D/0"]; e.Busy != 37.5 || e.Sema != 1.25 || e.Wait != 2.5 {
+	if e := s.Engines["Render/3D/0"]; e.Busy != 37.5 || e.Sema == nil || *e.Sema != 1.25 || e.Wait == nil || *e.Wait != 2.5 {
 		t.Errorf("Render/3D/0 = %+v", e)
 	}
 }
@@ -106,7 +106,7 @@ func TestReadStream_KeepsNewestSample(t *testing.T) {
 		t.Errorf("sample time %v is not recent", at)
 	}
 	// Second sample in the fixture: idle, no package power.
-	if s.FrequencyActual != 300 || s.PowerPackage != nil {
+	if s.FrequencyActual == nil || *s.FrequencyActual != 300 || s.PowerPackage != nil {
 		t.Errorf("expected the second (idle) sample, got %+v", s)
 	}
 }
@@ -169,7 +169,7 @@ func TestProvider_RunStreamsFromProcess(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		s, _, err := p.Latest()
-		if err == nil && s.FrequencyActual == 300 { // the second fixture sample
+		if err == nil && s.FrequencyActual != nil && *s.FrequencyActual == 300 { // the second fixture sample
 			break
 		}
 		if time.Now().After(deadline) {

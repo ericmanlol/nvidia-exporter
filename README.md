@@ -204,6 +204,15 @@ process is killed and reaped before the usual five-second restart delay;
 collection health clears when a fresh sample arrives. Cancellation also stops
 a process that has not produced its first sample.
 
+A usable `intel_gpu_top` sample must have a positive numeric `period.duration`
+(in milliseconds, representable as a Go duration) and at least one recognized
+numeric reading: frequency, interrupts, RC6, power, memory-controller bandwidth
+or an engine busy value. An engine entry must include its numeric `busy` field.
+Zero readings are valid; omitted or null optional counters are not exported as
+zero. Empty, unrelated or schema-invalid samples trigger process recovery and
+do not advance the last-success timestamp or reset the sample watchdog.
+Overall utilization is omitted when no engine busy readings are available.
+
 ### Intel utilization
 
 `nvidia-smi`'s utilization is the share of time *any* engine was busy. `intel_gpu_top` only reports busy time per engine (render, video, video enhance, blitter, compute), and engines run at the same time, so the overall value is not reported directly. `gpu_utilization_ratio` for Intel is estimated as:

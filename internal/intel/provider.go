@@ -209,7 +209,10 @@ func (p *GPUTopProvider) readSamples(r io.Reader, onSample func()) error {
 		if err := dec.Decode(&raw); err != nil {
 			return err
 		}
-		s := raw.sample()
+		s, err := raw.sample()
+		if err != nil {
+			return err
+		}
 
 		p.mu.Lock()
 		p.sample = s
