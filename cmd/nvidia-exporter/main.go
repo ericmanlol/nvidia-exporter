@@ -242,15 +242,15 @@ func validateMetricsPath(metricsPath string) error {
 }
 
 // openHwmon opens the hwmon directory chosen by intel.Select. It returns nil
-// (hwmon metrics disabled) if dir is empty or cannot be read.
+// (hwmon metrics disabled) only if no directory was selected. Read failures
+// remain visible in collection health and are retried on later scrapes.
 func openHwmon(dir string, logger *slog.Logger) *intel.Hwmon {
 	if dir == "" {
 		return nil
 	}
 	hw := intel.NewHwmon(dir)
 	if _, err := hw.Read(); err != nil {
-		logger.Warn("hwmon not readable, hwmon metrics disabled", "dir", dir, "error", err)
-		return nil
+		logger.Warn("no usable hwmon readings yet; will retry on scrapes", "dir", dir, "error", err)
 	}
 	logger.Info("hwmon metrics enabled", "dir", dir)
 	return hw

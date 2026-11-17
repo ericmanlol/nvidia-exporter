@@ -79,7 +79,7 @@ func TestHwmonRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.EnergyJoules != 10 || st.PowerWatts != nil {
+	if st.EnergyJoules == nil || *st.EnergyJoules != 10 || st.PowerWatts != nil {
 		t.Errorf("first read: energy=%v power=%v", st.EnergyJoules, st.PowerWatts)
 	}
 	if st.PowerLimit == nil || *st.PowerLimit != 31.25 {
@@ -122,5 +122,70 @@ func TestHwmonRead_NoEnergy(t *testing.T) {
 	_, mon := fakeSys(t)
 	if _, err := NewHwmon(mon).Read(); err == nil {
 		t.Error("want error without energy1_input")
+	}
+}
+
+func TestHwmonIndependentSensors(t *testing.T) {
+	for _, energy := range []string{"missing", "invalid"} {
+		t.Run(energy, func(t *testing.T) {
+			dir := t.TempDir()
+			if energy == "invalid" {
+				write(t, filepath.Join(dir, "energy1_input"), "not a number")
+			}
+			write(t, filepath.Join(dir, "temp1_input"), "45000")
+			write(t, filepath.Join(dir, "fan1_input"), "0")
+			write(t, filepath.Join(dir, "in0_input"), "743")
+			write(t, filepath.Join(dir, "power1_cap"), "31250000")
+			st, err := NewHwmon(dir).Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.EnergyJoules != nil || st.PowerWatts != nil {
+				t.Error("unavailable energy must not produce energy or power")
+			}
+			if st.Temps["temp1"] != 45 || st.FanRPM == nil || *st.FanRPM != 0 ||
+				st.VoltageV == nil || *st.VoltageV != .743 || st.PowerLimit == nil || *st.PowerLimit != 31.25 {
+				t.Errorf("independent sensors = %+v", st)
+			}
+		})
+	}
+}
+
+func TestHwmonRecoversAndResetsEnergyBaseline(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "hwmon") // not available initially
+	h := NewHwmon(dir)
+	now := time.Unix(1000, 0)
+	h.now = func() time.Time { return now }
+	if _, err := h.Read(); err == nil {
+		t.Fatal("missing directory must report no usable readings")
+	}
+	energy := filepath.Join(dir, "energy1_input")
+	write(t, energy, "0")
+	st, err := h.Read()
+	if err != nil || st.EnergyJoules == nil || *st.EnergyJoules != 0 || st.PowerWatts != nil {
+		t.Fatalf("first recovered reading = %+v, err = %v", st, err)
+	}
+	write(t, energy, "2000000")
+	now = now.Add(time.Second)
+	st, err = h.Read()
+	if err != nil || st.PowerWatts == nil || *st.PowerWatts != 2 {
+		t.Fatalf("second reading = %+v, err = %v", st, err)
+	}
+	write(t, energy, "invalid")
+	now = now.Add(time.Second)
+	if _, err := h.Read(); err == nil {
+		t.Fatal("invalid only sensor must report no usable readings")
+	}
+	write(t, energy, "5000000")
+	now = now.Add(time.Second)
+	st, err = h.Read()
+	if err != nil || st.PowerWatts != nil {
+		t.Fatalf("first energy after a gap must restart baseline: %+v, %v", st, err)
+	}
+	write(t, energy, "8000000")
+	now = now.Add(time.Second)
+	st, err = h.Read()
+	if err != nil || st.PowerWatts == nil || *st.PowerWatts != 3 {
+		t.Fatalf("power after recovery = %+v, err = %v", st, err)
 	}
 }
